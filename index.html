@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#071522">
+<title>Rainy Escape</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#071522; font-family:system-ui,-apple-system,Segoe UI,sans-serif; touch-action:none; }
+  body { display:flex; justify-content:center; align-items:center; }
+  #wrap { position:relative; width:min(100vw, 56.25vh); height:min(100dvh, 177.78vw); max-width:520px; max-height:920px; background:#081827; overflow:hidden; }
+  canvas { display:block; width:100%; height:100%; }
+  .hud { position:absolute; inset:0 0 auto 0; padding:calc(12px + env(safe-area-inset-top)) 16px 0; display:flex; justify-content:space-between; pointer-events:none; color:#eaf8ff; text-shadow:0 2px 8px #00101c; }
+  .stat { font-size:12px; letter-spacing:.12em; color:#9fc4d4; text-transform:uppercase; }
+  .num { font-size:25px; font-weight:800; line-height:1.2; }
+  .right { text-align:right; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:28px; text-align:center; background:linear-gradient(180deg,rgba(3,13,24,.38),rgba(3,13,24,.82)); color:#f1fbff; }
+  .overlay.hidden { display:none; }
+  .eyebrow { font-size:11px; letter-spacing:.28em; color:#79d8e8; font-weight:800; margin-bottom:10px; }
+  h1 { font-size:clamp(34px,10vw,54px); line-height:.95; margin:0 0 14px; letter-spacing:-.05em; }
+  p { max-width:290px; color:#c0d7e2; line-height:1.55; font-size:14px; margin:0 0 22px; }
+  button { border:0; border-radius:999px; padding:14px 28px; background:#8ce8ed; color:#06202a; font-size:14px; font-weight:900; letter-spacing:.08em; box-shadow:0 7px 0 #287c8d; }
+  button:active { transform:translateY(3px); box-shadow:0 4px 0 #287c8d; }
+  .hint { position:absolute; bottom:calc(16px + env(safe-area-inset-bottom)); left:0; right:0; text-align:center; color:rgba(207,235,246,.58); font-size:10px; letter-spacing:.16em; pointer-events:none; }
+  .pill { display:inline-block; padding:7px 12px; border:1px solid rgba(181,226,240,.24); border-radius:99px; color:#c3e5ef; font-size:11px; margin-bottom:18px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" aria-label="Rainy Escape game"></canvas>
+  <div class="hud">
+    <div><div class="stat">Score</div><div class="num" id="score">0</div></div>
+    <div style="display:flex;align-items:flex-start;gap:14px">
+      <button id="soundToggle" aria-label="Toggle sound" style="pointer-events:auto;padding:8px 11px;font-size:11px;letter-spacing:.04em;box-shadow:none;background:rgba(18,48,64,.88);color:#eaf8ff;border:1px solid rgba(181,226,240,.35)">🔊 SOUND ON</button>
+      <div class="right"><div class="stat">Best</div><div class="num" id="best">0</div></div>
+    </div>
+  </div>
+  <div class="overlay" id="start">
+    <div class="eyebrow">A RAINY NIGHT SURVIVAL</div>
+    <h1>RAINY<br>ESCAPE</h1>
+    <p>Rain is falling. The road is dangerous.<br>Stay alive and beat your high score.</p>
+    <div class="pill">MOVE YOUR FINGER TO STEER</div>
+    <button id="play">START RUN</button>
+  </div>
+  <div class="overlay hidden" id="over">
+    <div class="eyebrow">THE NIGHT GOT YOU</div>
+    <h1>RUN<br>OVER</h1>
+    <p id="result">You survived 0 seconds.</p>
+    <div class="pill" id="record">BEST: 0</div>
+    <button id="again">TRY AGAIN</button>
+  </div>
+  <div class="hint" id="hint">DRAG LEFT OR RIGHT TO DODGE</div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game'), ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score'), bestEl = document.getElementById('best');
+  const startOverlay = document.getElementById('start'), overOverlay = document.getElementById('over');
+  const resultEl = document.getElementById('result'), recordEl = document.getElementById('record');
+  const wrap = document.getElementById('wrap');
+  let W=360,H=640,dpr=1, running=false, last=0, elapsed=0, spawn=0, score=0;
+  let best = 0;
+  try { best = Number(localStorage.getItem('rainyEscapeBest') || 0); } catch(e) {}
+  bestEl.textContent = best;
+  let player={x:180,y:530,w:27,h:38,targetX:180};
+  let obstacles=[], rain=[], puddles=[];
+  // Sound is generated in-browser: no external files or internet needed.
+  let audioCtx=null, rainSource=null, rainGain=null, soundOn=true, lastHitSound=0;
+  function initAudio(){
+    if(!soundOn) return;
+    try {
+      if(!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const length = 2 * audioCtx.sampleRate;
+        const buffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        let prev = 0;
+        for(let i=0;i<length;i++){
+          const white = Math.random()*2-1;
+          prev = (prev + 0.025*white)/1.025;
+          data[i] = prev*3.5;
+        }
+        rainSource = audioCtx.createBufferSource();
+        rainSource.buffer = buffer;
+        rainSource.loop = true;
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'lowpass'; filter.frequency.value = 1250;
+        rainGain = audioCtx.createGain(); rainGain.gain.value = 0.16;
+        rainSource.connect(filter); filter.connect(rainGain); rainGain.connect(audioCtx.destination);
+        rainSource.start();
+      }
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+      if(rainGain) rainGain.gain.setTargetAtTime(0.16, audioCtx.currentTime, 0.25);
+    } catch(e) { /* Audio may be unavailable in some browsers. */ }
+  }
+  function muteAudio(){
+    if(audioCtx && rainGain) rainGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.08);
+  }
+  function beep(freq, duration, type='sine', volume=0.07){
+    if(!soundOn) return;
+    try {
+      initAudio(); if(!audioCtx) return;
+      const osc=audioCtx.createOscillator(), gain=audioCtx.createGain();
+      osc.type=type; osc.frequency.setValueAtTime(freq,audioCtx.currentTime);
+      gain.gain.setValueAtTime(volume,audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+duration);
+      osc.connect(gain);gain.connect(audioCtx.destination);osc.start();osc.stop(audioCtx.currentTime+duration);
+    } catch(e) {}
+  }
+  function playCrash(){
+    const now=performance.now();
+    if(now-lastHitSound<500)return; lastHitSound=now;
+    beep(115,0.24,'sawtooth',0.12);
+    setTimeout(()=>beep(72,0.3,'triangle',0.08),90);
+  }
+  const lanes=3;
+  function resize(){
+    const r=wrap.getBoundingClientRect(); dpr=Math.min(devicePixelRatio||1,2);
+    W=r.width; H=r.height; canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    player.y=H*.79; player.targetX=Math.max(22,Math.min(W-22,player.targetX||W/2)); player.x=Math.max(22,Math.min(W-22,player.x||W/2));
+    rain=Array.from({length:Math.floor(W*H/1500)},()=>({x:Math.random()*W,y:Math.random()*H,len:8+Math.random()*17,s:220+Math.random()*380}));
+    puddles=Array.from({length:18},()=>({x:Math.random()*W,y:Math.random()*H,r:8+Math.random()*28,a:.025+Math.random()*.045}));
+  }
+  window.addEventListener('resize',resize); resize();
+  function roundedRect(x,y,w,h,r,fill,stroke){
+    ctx.beginPath(); ctx.roundRect(x,y,w,h,r); if(fill){ctx.fillStyle=fill;ctx.fill();} if(stroke){ctx.strokeStyle=stroke;ctx.stroke();}
+  }
+  function drawBackground(dt){
+    const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#091727');g.addColorStop(.55,'#102a3a');g.addColorStop(1,'#07131e');
+    ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+    // Distant silhouettes and windows
+    for(let i=0;i<8;i++){
+      const bw=W/7+8, x=i*(W/7)-6, bh=70+((i*37)%100);
+      ctx.fillStyle=i%2?'#0a1d2a':'#0c2230';ctx.fillRect(x,H*.34-bh,bw,bh);
+      for(let wy=H*.34-bh+12;wy<H*.34-8;wy+=18) for(let wx=x+10;wx<x+bw-5;wx+=15){
+        ctx.fillStyle=((i*7+Math.floor(wy))%5===0)?'rgba(255,205,130,.23)':'rgba(105,177,202,.10)';
+        ctx.fillRect(wx,wy,4,7);
+      }
+    }
+    // Road
+    ctx.fillStyle='#142a36';ctx.beginPath();ctx.moveTo(W*.15,H*.35);ctx.lineTo(W*.85,H*.35);ctx.lineTo(W*1.13,H);ctx.lineTo(-W*.13,H);ctx.closePath();ctx.fill();
+    ctx.strokeStyle='rgba(144,209,224,.19)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(W*.15,H*.35);ctx.lineTo(-W*.13,H);ctx.moveTo(W*.85,H*.35);ctx.lineTo(W*1.13,H);ctx.stroke();
+    const shift=(elapsed*95)%70;
+    ctx.strokeStyle='rgba(160,211,223,.22)';ctx.lineWidth=2;ctx.setLineDash([22,30]);ctx.lineDashOffset=-shift;
+    for(let i=1;i<lanes;i++){let x=W*.15+(W*.7/lanes)*i;ctx.beginPath();ctx.moveTo(x,H*.35);ctx.lineTo(W/2+(x-W/2)*2.2,H);ctx.stroke();}
+    ctx.setLineDash([]);
+    for(const p of puddles){ctx.fillStyle=`rgba(110,196,215,${p.a})`;ctx.beginPath();ctx.ellipse(p.x,p.y,p.r,p.r*.22,0,0,Math.PI*2);ctx.fill();}
+    // Rain
+    ctx.strokeStyle='rgba(169,220,240,.27)';ctx.lineWidth=1;
+    for(const r of rain){ctx.beginPath();ctx.moveTo(r.x,r.y);ctx.lineTo(r.x-4,r.y+r.len);ctx.stroke();r.y+=r.s*dt;r.x-=r.s*dt*.18;if(r.y>H+20){r.y=-20;r.x=Math.random()*W;}}
+    // Soft streetlight glow
+    const glow=ctx.createRadialGradient(W*.5,H*.42,5,W*.5,H*.42,W*.55);
+    glow.addColorStop(0,'rgba(73,155,174,.09)');glow.addColorStop(1,'rgba(3,10,18,0)');
+    ctx.fillStyle=glow;ctx.fillRect(0,0,W,H);
+  }
+  function drawPlayer(){
+    const x=player.x,y=player.y;
+    // shadow
+    ctx.fillStyle='rgba(0,0,0,.35)';ctx.beginPath();ctx.ellipse(x,y+20,21,7,0,0,Math.PI*2);ctx.fill();
+    // jacket/body
+    roundedRect(x-13,y-14,26,31,8,'#65d8df','#c4fbff');
+    // hood
+    ctx.fillStyle='#b2f2f2';ctx.beginPath();ctx.arc(x,y-16,11,Math.PI,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#102c3b';ctx.beginPath();ctx.arc(x,y-16,6,Math.PI,Math.PI*2);ctx.fill();
+    // face
+    ctx.fillStyle='#e5c3a4';ctx.beginPath();ctx.arc(x,y-12,6,0,Math.PI*2);ctx.fill();
+    // legs
+    roundedRect(x-10,y+13,7,12,3,'#172c3b');roundedRect(x+3,y+13,7,12,3,'#172c3b');
+    // tiny highlight
+    ctx.strokeStyle='rgba(255,255,255,.55)';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(x-7,y-4);ctx.lineTo(x-7,y+7);ctx.stroke();
+  }
+  function drawObstacle(o){
+    ctx.save();ctx.translate(o.x,o.y);
+    if(o.type===0){ // fallen branch
+      ctx.rotate(.22);
+      roundedRect(-o.w/2,-o.h/2,o.w,o.h,5,'#6b4939','#b78c6d');
+      ctx.strokeStyle='#d3aa81';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-o.w*.25,0);ctx.lineTo(o.w*.25,0);ctx.stroke();
+    } else if(o.type===1){ // puddle
+      ctx.fillStyle='rgba(34,82,100,.9)';ctx.beginPath();ctx.ellipse(0,0,o.w*.6,o.h*.43,0,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='rgba(137,224,234,.75)';ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(0,0,o.w*.6,o.h*.43,0,0,Math.PI*2);ctx.stroke();
+      ctx.strokeStyle='rgba(179,237,242,.55)';ctx.beginPath();ctx.ellipse(0,0,o.w*.3,o.h*.18,0,0,Math.PI*2);ctx.stroke();
+    } else { // traffic cone
+      ctx.fillStyle='#ff9a62';ctx.beginPath();ctx.moveTo(0,-o.h/2);ctx.lineTo(o.w/2,o.h/2);ctx.lineTo(-o.w/2,o.h/2);ctx.closePath();ctx.fill();
+      ctx.fillStyle='#fff0d6';ctx.fillRect(-o.w*.28,o.h*.12,o.w*.56,4);
+      roundedRect(-o.w*.6,o.h*.36,o.w*1.2,5,2,'#e9a17a');
+    }
+    ctx.restore();
+  }
+  function spawnObstacle(){
+    const roadLeft=W*.15, roadWidth=W*.7;
+    const lane=Math.floor(Math.random()*3);
+    const x=roadLeft+roadWidth*(lane+.5)/3;
+    const scale=.75+Math.random()*.35;
+    const type=Math.floor(Math.random()*3);
+    obstacles.push({x,y:H*.34-20,w:(type===0?48:type===1?40:26)*scale,h:(type===0?16:type===1?24:34)*scale,type,speed:170+Math.min(180,elapsed*2.3)});
+  }
+  function endGame(){
+    playCrash();
+    running=false;
+    if(score>best){best=score;try{localStorage.setItem('rainyEscapeBest',String(best));}catch(e){}}
+    bestEl.textContent=best; resultEl.textContent=`You survived ${score} points. The rain wins this round.`;recordEl.textContent=`BEST: ${best}`;
+    overOverlay.classList.remove('hidden');
+  }
+  function startGame(){
+    if(soundOn) initAudio();
+    beep(520,0.08,'sine',0.045);
+    obstacles=[];elapsed=0;spawn=.5;score=0;scoreEl.textContent='0';player.x=W/2;player.targetX=W/2;last=performance.now();running=true;
+    startOverlay.classList.add('hidden');overOverlay.classList.add('hidden');document.getElementById('hint').textContent='DRAG LEFT OR RIGHT TO DODGE';
+    requestAnimationFrame(loop);
+  }
+  function loop(now){
+    if(!running)return;
+    const dt=Math.min((now-last)/1000,.035);last=now;elapsed+=dt;score=Math.floor(elapsed*10);scoreEl.textContent=score;
+    player.x+=(player.targetX-player.x)*Math.min(1,dt*12);
+    spawn-=dt;
+    const interval=Math.max(.42,1.05-elapsed*.009);
+    if(spawn<=0){spawnObstacle();spawn=interval*(.75+Math.random()*.5);}
+    obstacles.forEach(o=>o.y+=o.speed*dt);
+    obstacles=obstacles.filter(o=>o.y<H+70);
+    for(const o of obstacles){
+      const dx=Math.abs(o.x-player.x),dy=Math.abs(o.y-player.y);
+      if(dx<(o.w*.45+player.w*.42) && dy<(o.h*.38+player.h*.4)){endGame();break;}
+    }
+    drawBackground(dt);
+    obstacles.forEach(drawObstacle);
+    drawPlayer();
+    // vignette
+    const vg=ctx.createRadialGradient(W/2,H/2,H*.2,W/2,H/2,H*.75);vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.28)');ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+    if(running)requestAnimationFrame(loop);
+  }
+  function steer(e){
+    const rect=canvas.getBoundingClientRect();
+    player.targetX=Math.max(22,Math.min(W-22,e.clientX-rect.left));
+  }
+  canvas.addEventListener('pointerdown',e=>{if(running){canvas.setPointerCapture?.(e.pointerId);steer(e);}});
+  canvas.addEventListener('pointermove',e=>{if(running && (e.buttons||e.pointerType==='touch'))steer(e);});
+  document.getElementById('play').addEventListener('click',startGame);
+  document.getElementById('again').addEventListener('click',startGame);
+  document.getElementById('soundToggle').addEventListener('click',()=>{
+    soundOn=!soundOn;
+    const btn=document.getElementById('soundToggle');
+    btn.textContent=soundOn?'🔊 SOUND ON':'🔇 SOUND OFF';
+    if(soundOn){initAudio();beep(620,0.08,'sine',0.04);}else{muteAudio();}
+  });
+  // Initial static scene
+  drawBackground(0);drawPlayer();
+})();
+</script>
+</body>
+</html>
